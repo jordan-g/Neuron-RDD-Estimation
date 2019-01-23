@@ -2,17 +2,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # PARAMETERS
-dt              = 0.001             # timestep (s)
-v_reset         = 0                 # reset voltage
-v_threshold     = 1                 # spike threshold
-tau             = 0.01              # synaptic time constant (s)
-refractory_time = np.ceil(0.01/dt)  # refractory time (timesteps)
-u_window        = 1                 # RDD input drive window
-tau_s           = 0.003             # synaptic time constant (s)
-tau_L           = 0.01              # leak time constant (s)
-mem             = int(20/dt)        # spike history memory length (timesteps)
-reset_time      = 0.05/dt
-u_window_2      = 0.2
+dt               = 0.001             # timestep (s)
+v_reset          = 0                 # reset voltage
+v_threshold      = 1                 # spike threshold
+tau              = 0.01              # synaptic time constant (s) - used to calculate voltage
+refractory_time  = np.ceil(0.01/dt)  # refractory time (timesteps)
+u_window         = 1                 # input drive window used to determine near-threshold data points for RDD
+tau_s            = 0.003             # synaptic time constant (s) - used to calculate input
+tau_L            = 0.01              # leak time constant (s) - used to calculate input
+mem              = int(20/dt)        # spike history memory length (timesteps)
+RDD_window       = 0.05/dt           # RDD integration window length (timesteps)
+RDD_init_window  = 0.2               # window around spike threshold that determines when an RDD integration window is initiated
 
 # KERNEL FUNCTION
 def kappa(x):
@@ -25,46 +25,47 @@ kappas = np.flipud(get_kappas(mem))[:, np.newaxis] # initialize kappas array
 
 class Layer():
 	def __init__(self, size):
-		self.size                 = size
-		self.u                    = v_reset*np.ones((self.size, 1))
-		self.max_u                = np.zeros((self.size, 1))
-		self.v                    = v_reset*np.ones((self.size, 1))
-		self.dv_dt                = np.zeros((self.size, 1))
-		self.fired                = np.zeros((self.size, 1)).astype(bool)
-		self.refractory_time_left = np.zeros((self.size, 1))
-		self.reset_time_left      = np.zeros((self.size, 1))
-		self.spike_hist           = np.zeros((self.size, mem), dtype=np.int8)
-		self.feedback             = np.zeros((self.size, 1))
-		self.y                    = np.random.uniform(0, 1, size=(self.size, 1))
-		self.R                    = np.zeros((self.size, 1))
-		self.n_spikes             = np.zeros((self.size, 1))
-		self.window_times         = []
+		self.size                 = size                                      # number of units
+		self.u                    = v_reset*np.ones((self.size, 1))           # input drives
+		self.max_u                = np.zeros((self.size, 1))                  # maximum input drives for the current RDD integration windows
+		self.v                    = v_reset*np.ones((self.size, 1))           # voltages
+		self.dv_dt                = np.zeros((self.size, 1))                  # changes in voltages
+		self.fired                = np.zeros((self.size, 1)).astype(bool)     # whether units have spiked
+		self.refractory_time_left = np.zeros((self.size, 1))                  # time left in the refractory periods of units
+		self.RDD_time_left        = np.zeros((self.size, 1))                  # time left in RDD integration windows of units
+		self.spike_hist           = np.zeros((self.size, mem), dtype=np.int8) # spike histories of all units
+		self.feedback             = np.zeros((self.size, 1))                  # feedback input arriving at each unit
+		self.R                    = np.zeros((self.size, 1))                  # reward calculated in RDD integration windows
+		self.n_spikes             = np.zeros((self.size, 1))                  # number of spikes during RDD integration windows
+		self.RDD_windows            = []                                      # list of RDD integration window initiation times
 
 		# RDD estimation parameters
-		self.RDD_params = np.zeros((self.size, 4))
-		self.eta        = 0.01
+		self.RDD_params = np.zeros((self.size, 4)) # list of RDD estimation parameters - gamma, beta, alpha_l and alpha_r
+		self.eta        = 0.05                     # learning rate
 
 	def update(self, I, feedback=None, time=0):
 		if feedback is not None:
-			# determine which neurons are just ending their window
-			self.window_ending_mask = self.reset_time_left == 1
-
-			# if np.sum(self.window_ending_mask) > 0 and feedback is not None:
-			# 	print("- {}".format(time))
-				# print(time)
-
-			self.max_u[np.logical_and(self.reset_time_left > 0, self.u > self.max_u)] = self.u[np.logical_and(self.reset_time_left > 0, self.u > self.max_u)]
-
 			self.feedback = feedback
 
-			self.R[self.reset_time_left > 0] += self.feedback[self.reset_time_left > 0]
+			# determine which neurons are just ending their RDD integration window
+			self.RDD_window_ending_mask = self.RDD_time_left == 1
 
-			self.reset_time_left[self.reset_time_left > 0] -= 1
+			# update maximum input drives for units in their RDD integration window
+			self.max_u[np.logical_and(self.RDD_time_left > 0, self.u > self.max_u)] = self.u[np.logical_and(self.RDD_time_left > 0, self.u > self.max_u)]
+
+			# update rewards for units in their RDD integration window
+			self.R[self.RDD_time_left > 0] += self.feedback[self.RDD_time_left > 0]
 
 		# update refractory period timesteps remaining for each neuron
 		self.refractory_time_left[self.refractory_time_left > 0] -= 1
 
-		# calculate change in voltage and input drive, and update both
+		if feedback is not None:
+			# reset the input drive to match the voltage, for neurons that are not in an RDD integration window
+			self.u[self.RDD_time_left == 0] = self.v[self.RDD_time_left == 0]
+		else:
+			self.v = self.u
+
+		# calculate changes in voltages and input drives, and update both
 		self.dv_dt    = -self.v/(tau) + I
 		self.u       += dt*self.dv_dt
 		self.v       += dt*self.dv_dt
@@ -75,118 +76,84 @@ class Layer():
 		# determine which neurons are above spiking threshold
 		threshold_mask  = self.v >= v_threshold
 
-		if feedback is not None:
-			self.update_RDD_estimate(time=time)
-			
-			self.u[self.window_ending_mask] = self.v[self.window_ending_mask]
-
-		# determine which neurons are starting a new window
-		self.new_window_mask = np.logical_and(np.abs(v_threshold - self.u) <= u_window_2, self.reset_time_left == 0)
-
-		if feedback is None:
-			self.new_window_mask *= False
-
-		if feedback is None:
-			self.u = self.v
-
-		# if np.sum(self.new_window_mask) > 0 and feedback is not None:
-		# 	print("New window at times {}".format(time), end="")
-		# 	# print(time)
-		# 	# print(t, self.u[0, 0])
-		# 	self.window_times.append(time)
-
-		# neurons above threshold will spike
-		self.fired[threshold_mask] = True
-
-		# make sure neurons do not spike when in the refractory period
-		self.fired[refractory_mask] = False
+		# neurons above threshold that are not in their refractory period will spike
+		self.fired *= False
+		self.fired[np.logical_and(threshold_mask, refractory_mask == False)] = True
 
 		# reset voltages of neurons that spiked
 		self.v[self.fired] = v_reset
 
-		if feedback is not None:
-			self.u[self.reset_time_left == 0] = self.v[self.reset_time_left == 0]
-
-		# reset input drive if a neuron has spiked and the refractory period is ending
-		# self.u[self.new_window_mask] = self.v[self.new_window_mask]
-
-			self.n_spikes[self.window_ending_mask] = 0
-			self.R[self.window_ending_mask] = 0
-			self.max_u[self.window_ending_mask] = 0
-
-			self.reset_time_left[self.new_window_mask] = reset_time
-
 		# update refractory period timesteps remaining for each neuron
 		self.refractory_time_left[self.fired] = refractory_time
 
-		self.n_spikes[np.logical_and(self.reset_time_left > 0, self.fired)] += 1
+		if feedback is not None:
+			# reset the input drive to match the voltage, for neurons that are not in an RDD integration window
+			self.u[self.RDD_time_left == 0] = self.v[self.RDD_time_left == 0]
+		else:
+			self.v = self.u
 
-		# if np.sum(self.reset_time_left) == reset_time+1 and feedback is not None:
-		# 	print("Reset at time {}".format(time))
+		if feedback is not None:
+			# update RDD estimates (only neurons whose RDD integration window has ended will update their estimate)
+			self.update_RDD_estimate(time=time)
 
-		# update spike history
+		# decrement time left in RDD integration windows
+		self.RDD_time_left[self.RDD_time_left > 0] -= 1
+
+		# determine which neurons are starting a new RDD integration window
+		if feedback is not None:
+			self.new_RDD_window_mask = np.logical_and(np.abs(v_threshold - self.u) <= RDD_init_window, self.RDD_time_left == 0)
+
+			self.RDD_time_left[self.new_RDD_window_mask] = RDD_window
+		else:
+			self.new_RDD_window_mask = np.zeros((self.size, 1)).astype(bool)
+
+		if feedback is not None:
+			# reset RDD variables for neurons whose RDD integration window has ended
+			self.n_spikes[self.RDD_window_ending_mask] = 0
+			self.R[self.RDD_window_ending_mask]        = 0
+			self.max_u[self.RDD_window_ending_mask]    = 0
+
+		# update number of spikes that have occurred during RDD integration windows
+		self.n_spikes[np.logical_and(self.RDD_time_left > 0, self.fired)] += 1
+
+		# update spike histories
 		self.spike_hist = np.concatenate([self.spike_hist[:, 1:], self.fired.astype(int)], axis=1)
 
 	def update_RDD_estimate(self, time=0):
-		# if np.sum(self.window_ending_mask) > 0:
-		# 	print(time, self.max_u[0, 0])
+		# figure out which neurons are at the end of their RDD integration window, and either just spiked or almost spiked
+		just_spiked_mask   = np.logical_and(self.RDD_window_ending_mask, np.logical_and(np.abs(self.max_u - v_threshold) <= u_window, self.max_u >= v_threshold))[:, 0]
+		almost_spiked_mask = np.logical_and(self.RDD_window_ending_mask, np.logical_and(np.abs(self.max_u - v_threshold) <= u_window, self.max_u < v_threshold))[:, 0]
 
-		# figure out which neurons just spiked or almost spiked
-		just_spiked_mask   = np.logical_and(self.window_ending_mask, np.logical_and(np.abs(self.max_u - v_threshold) <= u_window, self.max_u >= v_threshold))[:, 0]
-		almost_spiked_mask = np.logical_and(self.window_ending_mask, np.logical_and(np.abs(self.max_u - v_threshold) <= u_window, self.max_u < v_threshold))[:, 0]
-
-		# create array used to update RDD estimates
+		# create an array used to update RDD estimates
 		a = np.ones((4, self.size))
 		a[1, :] = (self.n_spikes >= 1).astype(float)
 		a[2, :] = (self.n_spikes >= 1).astype(float)*(self.max_u - v_threshold)
 		a[3, :] = (1 - (self.n_spikes >= 1).astype(float))*(self.max_u - v_threshold)
 
-		# print(a)
-
 		# update RDD estimates for neurons that just spiked or almost spiked
 		if np.sum(just_spiked_mask) > 0:
 			self.RDD_params[just_spiked_mask]   -= np.array([ self.eta*(np.dot(self.RDD_params[i], a[:, i]) - self.R[i])*a[:, i] for i in np.where(just_spiked_mask)[0] ])
-			# self.y[just_spiked_mask] -= np.array([ self.eta*(self.y[i] - self.R[i]) for i in np.where(just_spiked_mask)[0] ])
-			
-			# print(self.RDD_params[just_spiked_mask, 0])
-			# print("just", time)
-			# print(a)
-			# print(self.n_spikes)
-			# print("u", self.max_u[0, 0])
-			# print("R", self.R[0, 0])
 
-			# print(self.n_spikes[0, 0], time)
-			# print(time, self.max_u[0, 0])
-			# print(time, self.R[0, 0])
-
-			self.window_times.append(time)
-
-			# print(self.reset_time_left[0, 0], self.refractory_time_left[0, 0], )
+			self.RDD_windows.append(time)
 		elif np.sum(almost_spiked_mask) > 0:
 			self.RDD_params[almost_spiked_mask] -= np.array([ self.eta*(np.dot(self.RDD_params[i], a[:, i]) - self.R[i])*a[:, i] for i in np.where(almost_spiked_mask)[0] ])
-			# self.y[almost_spiked_mask] -= np.array([ self.eta*(self.y[i] + self.R[i]) for i in np.where(almost_spiked_mask)[0] ])
 
-			# print(self.RDD_params[almost_spiked_mask, 0])
-			# print("almost", time)
-			# print("u", self.max_u[0, 0])
-			# print("R", self.R[0, 0])
-
-			# print(time, self.max_u[0, 0])
-			# print(time, self.R[0, 0])
-
-			self.window_times.append(time)
-
-			# print(self.reset_time_left[0, 0], self.refractory_time_left[0, 0], )
+			self.RDD_windows.append(time)
 
 if __name__ == "__main__":
+	# set experiment parameters
 	n_trials     = 100
 	layer_1_size = 1
 
-	ws             = []
-	vals           = []
-	estimated_vals = []
+	# initialize lists for recording results
+	ws                         = []
+	RDD_values                 = []
+	final_estimated_RDD_values = []
 
-	# ws = np.linspace(-500, 500, n_trials)
+	# set weight values that will be tested
+	ws = np.zeros((n_trials, layer_1_size))
+	for i in range(layer_1_size):
+		ws[:, i] = np.linspace(-1000, 1000, n_trials)
 
 	for k in range(n_trials):
 		print("Trial {}/{}.".format(k+1, n_trials))
@@ -195,9 +162,8 @@ if __name__ == "__main__":
 		layer_1 = Layer(size=layer_1_size)
 		layer_2 = Layer(size=1)
 
-		# set weight from neuron 1 to neuron 2 randomly
-		w = 500*np.random.uniform(-5, 5, size=(1, layer_1_size))
-		# w = 5000*np.ones((1, layer_1_size))
+		# set the weight from neuron 1 to neuron 2
+		w = ws[k]
 
 		# set total time of simulation (timesteps)
 		total_time = int(60/dt)
@@ -205,111 +171,71 @@ if __name__ == "__main__":
 		# create array of timesteps
 		time_array = np.arange(total_time)
 
-		# create independent inputs for layer 1 and 2
-		input_1 = np.zeros((layer_1_size, total_time))
-		for j in range(layer_1_size):
-			input_1[j] = 200*(np.random.normal(0, 1, size=total_time))
-			# input_1[j, 1000:2000] = 10
+		# create inputs for layer 1 and 2 with a degree of correlation determined by alpha (1 means no correlation)
+		alpha = 0.5
 
+		input_1 = 200*(np.random.normal(0, 1, size=(layer_1_size, total_time)))
 		input_2 = 200*(np.random.normal(0, 1, size=total_time))
-
 		input_3 = 200*(np.random.normal(0, 1, size=total_time))
 
-		alpha = 0.5
 		input_1 = np.sqrt(alpha)*input_1 + np.sqrt(1 - alpha)*input_3
 		input_2 = np.sqrt(alpha)*input_2 + np.sqrt(1 - alpha)*input_3
-		# input_2 = 0*(np.random.normal(0, 1, size=total_time) + 0.5)
 
 		# initialize recording arrays
-		voltages_1   = np.zeros((layer_1_size, total_time))
-		voltages_2   = np.zeros((1, total_time))
-		drives_1     = np.zeros((layer_1_size, total_time))
-		drives_2     = np.zeros((1, total_time))
-		feedbacks    = np.zeros((1, total_time))
+		voltages_1           = np.zeros((layer_1_size, total_time))
+		voltages_2           = np.zeros((1, total_time))
+		drives_1             = np.zeros((layer_1_size, total_time))
+		drives_2             = np.zeros((1, total_time))
+		feedbacks            = np.zeros((1, total_time))
+		estimated_RDD_values = np.zeros((1, total_time))
 
-		below_us           = [ [] for j in range(layer_1_size) ]
-		above_us           = [ [] for j in range(layer_1_size) ]
-		below_Rs           = [ [] for j in range(layer_1_size) ]
-		above_Rs           = [ [] for j in range(layer_1_size) ]
-		window_start_times = [ [] for j in range(layer_1_size) ]
+		below_us                = [ [] for j in range(layer_1_size) ]
+		above_us                = [ [] for j in range(layer_1_size) ]
+		below_Rs                = [ [] for j in range(layer_1_size) ]
+		above_Rs                = [ [] for j in range(layer_1_size) ]
+		window_start_times      = [ [] for j in range(layer_1_size) ]
 		kept_window_start_times = [ [] for j in range(layer_1_size) ]
 
 		print("Running simulation...")
-
-		est = []
 
 		for t in range(total_time):
 			# update layer 1 and 2 activities
 			layer_1.update(input_1[:, t][:, np.newaxis], feedback=np.dot(layer_2.spike_hist, kappas), time=t)
 			layer_2.update(np.dot(w, np.dot(layer_1.spike_hist, kappas)) + input_2[t])
 
-			# if np.sum(layer_1.new_window_mask) == 1:
-				# print(t)
-
-			est.append(layer_1.RDD_params[0, 1])
-
 			# record voltages and input drives
-			voltages_1[:, t] = layer_1.v[:, 0]
-			voltages_2[:, t] = layer_2.v[:, 0]
-			drives_1[:, t]   = layer_1.u[:, 0]
-			drives_2[:, t]   = layer_2.u[:, 0]
-			feedbacks[:, t]  = layer_1.feedback[:, 0]
+			voltages_1[:, t]           = layer_1.v[:, 0]
+			voltages_2[:, t]           = layer_2.v[:, 0]
+			drives_1[:, t]             = layer_1.u[:, 0]
+			drives_2[:, t]             = layer_2.u[:, 0]
+			feedbacks[:, t]            = layer_1.feedback[:, 0]
+			estimated_RDD_values[:, t] = layer_1.RDD_params[0, 1]
 
-
-		RDD_params = np.zeros(3)
-
+		# compute RDD points after-the-fact (for troubleshooting purposes)
 		for t in range(total_time):
 			for j in range(layer_1_size):
-				if len(window_start_times[j]) == 0 or window_start_times[j][-1] + reset_time <= t <= total_time - reset_time:
-					if np.abs(v_threshold - drives_1[j, t]) <= u_window_2:
-						max_drive = np.amax(drives_1[j, t:t+int(reset_time)])
-						# print(t+1, t+int(reset_time)+1)
+				if len(window_start_times[j]) == 0 or window_start_times[j][-1] + RDD_window <= t <= total_time - RDD_window:
+					if np.abs(v_threshold - drives_1[j, t]) <= RDD_init_window:
+						# calculate maximum input drive
+						max_drive = np.amax(drives_1[j, t:t+int(RDD_window)])
+
 						window_start_times[j].append(t)
 
-						# print(t+int(reset_time)+1)
-						# print(t)
-						# print(t, drives_1[j, t])
-
 						if np.abs(v_threshold - max_drive) <= u_window:
-
-							# print(t+int(reset_time)+1)
-							# print(t)
-							# print(feedbacks[:, t+1:t+int(reset_time)+2].shape)
-
-							# mean_R    = np.mean(feedbacks[:, t+1:t+int(reset_time)])
-							mean_R    = np.sum(feedbacks[:, t+1:t+int(reset_time)+1])
-
-							# a = np.ones(3)
-							# a[1] = (max_drive >= v_threshold).astype(float)*(max_drive - v_threshold)
-							# a[2] = (1 - (max_drive >= v_threshold).astype(float))*(max_drive - v_threshold)
+							# compute reward
+							R = np.sum(feedbacks[:, t+1:t+int(RDD_window)+1])
 
 							if max_drive < v_threshold:
-								# print(max_drive)
-								# print(mean_R)
-								# print(t+int(reset_time), max_drive)
-								# print(t+int(reset_time), mean_R, max_drive)
 								below_us[j].append(max_drive)
-								below_Rs[j].append(mean_R)
+								below_Rs[j].append(R)
 								kept_window_start_times[j].append(t)
-
-								# RDD_params -= layer_1.eta*(np.dot(RDD_params, a) + mean_R)*a
 							else:
-								# print(t+int(reset_time), max_drive)
-								# print(max_drive)
-								# print(t+int(reset_time), mean_R)
 								above_us[j].append(max_drive)
-								above_Rs[j].append(mean_R)
+								above_Rs[j].append(R)
 								kept_window_start_times[j].append(t)
 
-								# RDD_params -= layer_1.eta*(np.dot(RDD_params, a) - mean_R)*a
-
-							# print(RDD_params[0])
-
-		print(len(layer_1.window_times))
+		print(len(layer_1.RDD_windows))
 		print(len(kept_window_start_times[0]))
-
-		# print(layer_1.window_times)
-		# print(window_start_times[0])
 
 		print("Below data points: {}".format(len(below_us[0])))
 		print("Above data points: {}".format(len(above_us[0])))
@@ -332,20 +258,21 @@ if __name__ == "__main__":
 			m_below = 0
 			c_below = 0
 
-		# calculate true RDD value (beta), and record the one estimated by layer 1 neurons
-		rdd_value           = (m_above*v_threshold + c_above) - (m_below*v_threshold + c_below)
-		# rdd_value           = np.mean(above_Rs, axis=-1) - np.mean(below_Rs, axis=-1)
-		estimated_rdd_value = layer_1.RDD_params[:, 1]
+		# calculate the true RDD value (beta), and record the one estimated by layer 1 neurons
+		RDD_value           = (m_above*v_threshold + c_above) - (m_below*v_threshold + c_below)
+		# RDD_value           = np.mean(above_Rs, axis=-1) - np.mean(below_Rs, axis=-1)
+
+		final_estimated_RDD_value = layer_1.RDD_params[0, 1]
 
 		if k == 0:
-			plt.plot(est)
-			plt.plot(np.arange(len(est)), rdd_value*np.ones(len(est)))
+			plt.plot(estimated_RDD_values[0, :])
+			plt.plot(np.arange(total_time), RDD_value*np.ones(total_time))
 			plt.show()
 
-		window_array = np.zeros(time_array.shape)
-
+		# create an array that is 1 when an RDD window was occurring, and 0 otherwise
+		RDD_window_array = np.zeros(time_array.shape)
 		for t in kept_window_start_times[0]:
-			window_array[t:t+int(reset_time)] = 1
+			RDD_window_array[t:t+int(RDD_window)] = 1
 
 		# plot results for the first trial
 		if k == 0:
@@ -360,7 +287,7 @@ if __name__ == "__main__":
 			plt.plot(time_array, v_threshold*np.ones(total_time), 'k', linestyle='--')
 			plt.xlim(0, total_time)
 
-			plt.gca().fill_between(np.arange(total_time), 0, 1, where=time_array*window_array > 0, facecolor='green', alpha=0.3)
+			plt.gca().fill_between(np.arange(total_time), 0, 1, where=time_array*RDD_window_array > 0, facecolor='green', alpha=0.3)
 
 			plt.xlabel("Time (timesteps)")
 
@@ -390,16 +317,14 @@ if __name__ == "__main__":
 			plt.show()
 		
 		print("Neuron 1 -> 2 weight: {}.".format(w))
-		print("RDD value: {}.".format(rdd_value))
-		print("Estimated RDD value: {}.".format(estimated_rdd_value))
-
-		ws.append(w)
-		vals.append(rdd_value)
-		estimated_vals.append(estimated_rdd_value)
+		print("RDD value: {}.".format(RDD_value))
+		print("Estimated RDD value: {}.".format(final_estimated_RDD_value))
+		RDD_values.append(RDD_value)
+		final_estimated_RDD_values.append(final_estimated_RDD_value)
 
 	# plot results for all trials
-	plt.scatter([ w[0, 0] for w in ws ], [ val for val in vals ], c='g', alpha=0.5, label='RDD Value')
-	plt.scatter([ w[0, 0] for w in ws ], [ val[0] for val in estimated_vals ], c='b', alpha=0.5, label='Estimated RDD Value')
+	plt.scatter([ ws[i, 0] for i in range(n_trials) ], [ value for value in RDD_values ], c='g', alpha=0.5, label='RDD Value')
+	plt.scatter([ ws[i, 0] for i in range(n_trials) ], [ value for value in final_estimated_RDD_values ], c='b', alpha=0.5, label='Estimated RDD Value')
 	plt.axvline(x=0, color='k', linestyle='--')
 	plt.axhline(y=0, color='k', linestyle='--')
 	plt.xlabel("Neuron 1 -> 2 Weight")
