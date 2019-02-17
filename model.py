@@ -17,7 +17,7 @@ RDD_window       = 0.02/dt           # RDD integration window length (timesteps)
 RDD_init_window  = 0.1               # window around spike threshold that determines when an RDD integration window is initiated
 
 # whether to show a live updating plot of weights vs. estimated RDD values
-updating_plot = True
+updating_plot = False
 
 # KERNEL FUNCTION
 def kappa(x):
@@ -74,8 +74,9 @@ class Layer():
         self.refractory_time_left[self.refractory_time_left > 0] -= 1
 
         # calculate changes in voltages and input drives, and update both
-        self.dv_dt    = -self.v/(tau) + 2*(I - self.v)
-        self.u       += dt*self.dv_dt
+        self.dv_dt    = -self.v/(tau) + I
+        self.du_dt    = -self.u/(tau) + I
+        self.u       += dt*self.du_dt
         self.v       += dt*self.dv_dt
 
         # determine which neurons are in a refractory period
@@ -130,14 +131,14 @@ class Layer():
             self.RDD_params[just_spiked_mask, 0] -= self.eta*np.squeeze(err)
 
             # update list of which (if any) neurons are updating their RDD estimate and are above threshold
-            self.neurons_updated_above = list(np.where(just_spiked_mask))
+            self.neurons_updated_above = list(np.where(just_spiked_mask)[0])
         if np.sum(almost_spiked_mask) > 0:
             err = self.RDD_params[almost_spiked_mask, 3]*self.max_u[almost_spiked_mask, 0] + self.RDD_params[almost_spiked_mask, 1] - self.R[almost_spiked_mask, 0]
             self.RDD_params[almost_spiked_mask, 3] -= self.eta*np.squeeze(err*self.max_u[almost_spiked_mask, 0])
             self.RDD_params[almost_spiked_mask, 1] -= self.eta*np.squeeze(err)
 
             # update list of which (if any) neurons are updating their RDD estimate and are below threshold
-            self.neurons_updated_below = list(np.where(almost_spiked_mask))
+            self.neurons_updated_below = list(np.where(almost_spiked_mask)[0])
 
     def reset_RDD_variables(self):
         # reset RDD variables for neurons whose RDD integration window has ended
@@ -195,11 +196,11 @@ def pause(interval):
 
 if __name__ == "__main__":
     # set alpha values to test (correlation between inputs = 1 - alpha)
-    alpha_values = [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.0]
+    alpha_values = [1.0]
 
     for alpha in alpha_values:
         # set experiment parameters
-        n_trials     = 200
+        n_trials     = 20
         layer_1_size = 1
 
         # initialize lists for recording results
@@ -224,7 +225,7 @@ if __name__ == "__main__":
         final_estimated_RDD_values = []
 
         # set feedforward weight values that will be tested
-        ws = np.random.uniform(-1000, 1000, size=(n_trials, layer_1_size))
+        ws = np.random.uniform(-1000, -500, size=(n_trials, layer_1_size))
 
         # create feedback weights
         y = np.ones((layer_1_size, 1))
@@ -288,35 +289,32 @@ if __name__ == "__main__":
                 # record variables
                 estimated_RDD_value = (layer_1.RDD_params[:, 2]*v_threshold + layer_1.RDD_params[:, 0]) - (layer_1.RDD_params[:, 3]*v_threshold + layer_1.RDD_params[:, 1])
                 estimated_RDD_values[k].append(estimated_RDD_value)
-                all_c_aboves[k].append(layer_1.RDD_params[:, 0])
-                all_m_aboves[k].append(layer_1.RDD_params[:, 2])
-                all_c_belows[k].append(layer_1.RDD_params[:, 1])
-                all_m_belows[k].append(layer_1.RDD_params[:, 3])
-                layer_1_vs[k].append(layer_1.v)
-                layer_1_us[k].append(layer_1.u)
-                layer_1_spikes[k].append(layer_1.fired)
-                layer_1_inputs[k].append(layer_1_input)
-                layer_1_feedbacks[k].append(layer_1_feedback)
-                layer_2_vs[k].append(layer_2.v)
-                layer_2_spikes[k].append(layer_2.fired)
-                layer_2_inputs[k].append(layer_2_input)
-                estimated_RDD_values[k].append(estimated_RDD_value)
-                estimated_RDD_values[k].append(estimated_RDD_value)
-                estimated_RDD_values[k].append(estimated_RDD_value)
+                all_c_aboves[k].append(layer_1.RDD_params[:, 0].copy())
+                all_m_aboves[k].append(layer_1.RDD_params[:, 2].copy())
+                all_c_belows[k].append(layer_1.RDD_params[:, 1].copy())
+                all_m_belows[k].append(layer_1.RDD_params[:, 3].copy())
+                layer_1_vs[k].append(layer_1.v.copy())
+                layer_1_us[k].append(layer_1.u.copy())
+                layer_1_spikes[k].append(layer_1.fired.copy())
+                layer_1_inputs[k].append(layer_1_input.copy())
+                layer_1_feedbacks[k].append(layer_1_feedback.copy())
+                layer_2_vs[k].append(layer_2.v.copy())
+                layer_2_spikes[k].append(layer_2.fired.copy())
+                layer_2_inputs[k].append(layer_2_input.copy())
 
                 for j in layer_1.neurons_updated_below:
-                    below_max_drives[j].append(layer_1.max_u)
-                    below_Rs[j].append(layer_1.R)
+                    below_max_drives[j].append(layer_1.max_u[j].copy())
+                    below_Rs[j].append(layer_1.R[j].copy())
 
-                    all_max_drives[k].append(layer_1.max_u)
-                    all_Rs[k].append(layer_1.R)
+                    all_max_drives[k].append(layer_1.max_u[j].copy())
+                    all_Rs[k].append(layer_1.R[j].copy())
                     all_RDD_times[k].append(t)
                 for j in layer_1.neurons_updated_above:
-                    above_max_drives[j].append(layer_1.max_u)
-                    above_Rs[j].append(layer_1.R)
+                    above_max_drives[j].append(layer_1.max_u[j].copy())
+                    above_Rs[j].append(layer_1.R[j].copy())
 
-                    all_max_drives[k].append(layer_1.max_u)
-                    all_Rs[k].append(layer_1.R)
+                    all_max_drives[k].append(layer_1.max_u[j].copy())
+                    all_Rs[k].append(layer_1.R[j].copy())
                     all_RDD_times[k].append(t)
 
                 # reset layer 1 RDD variables
@@ -386,24 +384,24 @@ if __name__ == "__main__":
                 pause(0.0001)
 
         # save recorded variables
-        np.save('alt_1_unit_lstsq_correlation_{}_ws.npy'.format(1-alpha), ws)
-        np.save('alt_1_unit_lstsq_correlation_{}_final_estimated_RDD_values.npy'.format(1-alpha), final_estimated_RDD_values)
-        np.save('alt_1_unit_lstsq_correlation_{}_estimated_RDD_values.npy'.format(1-alpha), estimated_RDD_values)
-        np.save('alt_1_unit_lstsq_correlation_{}_max_drives.npy'.format(1-alpha), all_max_drives)
-        np.save('alt_1_unit_lstsq_correlation_{}_Rs.npy'.format(1-alpha), all_Rs)
-        np.save('alt_1_unit_lstsq_correlation_{}_all_c_belows.npy'.format(1-alpha), all_c_belows)
-        np.save('alt_1_unit_lstsq_correlation_{}_all_m_belows.npy'.format(1-alpha), all_m_belows)
-        np.save('alt_1_unit_lstsq_correlation_{}_all_c_aboves.npy'.format(1-alpha), all_c_aboves)
-        np.save('alt_1_unit_lstsq_correlation_{}_all_m_aboves.npy'.format(1-alpha), all_m_aboves)
-        np.save('alt_1_unit_lstsq_correlation_{}_layer_1_vs.npy'.format(1-alpha), layer_1_vs)
-        np.save('alt_1_unit_lstsq_correlation_{}_layer_1_us.npy'.format(1-alpha), layer_1_us)
-        np.save('alt_1_unit_lstsq_correlation_{}_layer_1_spikes.npy'.format(1-alpha), layer_1_spikes)
-        np.save('alt_1_unit_lstsq_correlation_{}_layer_1_inputs.npy'.format(1-alpha), layer_1_inputs)
-        np.save('alt_1_unit_lstsq_correlation_{}_layer_1_feedbacks.npy'.format(1-alpha), layer_1_feedbacks)
-        np.save('alt_1_unit_lstsq_correlation_{}_layer_2_vs.npy'.format(1-alpha), layer_2_vs)
-        np.save('alt_1_unit_lstsq_correlation_{}_layer_2_spikes.npy'.format(1-alpha), layer_2_spikes)
-        np.save('alt_1_unit_lstsq_correlation_{}_layer_2_inputs.npy'.format(1-alpha), layer_2_inputs)
-        np.save('alt_1_unit_lstsq_correlation_{}_all_RDD_times.npy'.format(1-alpha), all_RDD_times)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_ws.npy'.format(1-alpha), ws)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_final_estimated_RDD_values.npy'.format(1-alpha), final_estimated_RDD_values)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_estimated_RDD_values.npy'.format(1-alpha), estimated_RDD_values)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_max_drives.npy'.format(1-alpha), all_max_drives)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_Rs.npy'.format(1-alpha), all_Rs)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_all_c_belows.npy'.format(1-alpha), all_c_belows)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_all_m_belows.npy'.format(1-alpha), all_m_belows)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_all_c_aboves.npy'.format(1-alpha), all_c_aboves)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_all_m_aboves.npy'.format(1-alpha), all_m_aboves)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_layer_1_vs.npy'.format(1-alpha), layer_1_vs)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_layer_1_us.npy'.format(1-alpha), layer_1_us)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_layer_1_spikes.npy'.format(1-alpha), layer_1_spikes)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_layer_1_inputs.npy'.format(1-alpha), layer_1_inputs)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_layer_1_feedbacks.npy'.format(1-alpha), layer_1_feedbacks)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_layer_2_vs.npy'.format(1-alpha), layer_2_vs)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_layer_2_spikes.npy'.format(1-alpha), layer_2_spikes)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_layer_2_inputs.npy'.format(1-alpha), layer_2_inputs)
+        np.save('alt_1_unit_lstsq_correlation_2_{}_all_RDD_times.npy'.format(1-alpha), all_RDD_times)
 
         # plot results for all trials
         plt.clf()
@@ -413,8 +411,8 @@ if __name__ == "__main__":
         plt.xlabel("Feedforward Weight")
         plt.ylabel("RDD Value")
         plt.legend()
-        plt.savefig('alt_1_unit_lstsq_correlation_{}.png'.format(1-alpha))
-        plt.savefig('alt_1_unit_lstsq_correlation_{}.svg'.format(1-alpha))
+        plt.savefig('alt_1_unit_lstsq_correlation_2_{}.png'.format(1-alpha))
+        plt.savefig('alt_1_unit_lstsq_correlation_2_{}.svg'.format(1-alpha))
 
         plt.clf()
         plt.scatter([ ws[i] for i in range(n_trials) ], [ value for value in final_estimated_RDD_values ], c='b', alpha=0.5, label='Estimated RDD Value')
@@ -423,5 +421,5 @@ if __name__ == "__main__":
         plt.xlabel("Feedforward Weight")
         plt.ylabel("RDD Value")
         plt.legend()
-        plt.savefig('alt_1_unit_RDD_estimate_correlation_{}.png'.format(1-alpha))
-        plt.savefig('alt_1_unit_RDD_estimate_correlation_{}.svg'.format(1-alpha))
+        plt.savefig('alt_1_unit_RDD_estimate_correlation_2_{}.png'.format(1-alpha))
+        plt.savefig('alt_1_unit_RDD_estimate_correlation_2_{}.svg'.format(1-alpha))
